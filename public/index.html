@@ -1,0 +1,78 @@
+const express = require("express");
+const http = require("http");
+const path = require("path");
+const WebSocket = require("ws");
+
+const app = express();
+app.use(express.static(path.join(__dirname, "public")));
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+// roomId -> array of { ws, symbol }
+const rooms = {};
+
+function cleanupRoom(roomId, ws) {
+  if (!rooms[roomId]) return;
+  rooms[roomId] = rooms[roomId].filter((p) => p.ws !== ws);
+  if (rooms[roomId].length === 0) delete rooms[roomId];
+}
+
+wss.on("connection", (ws) => {
+  let currentRoom = null;
+
+  ws.on("message", (raw) => {
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+
+    if (data.type === "join") {
+      const roomId = data.room;
+      if (!rooms[roomId]) rooms[roomId] = [];
+
+      if (rooms[roomId].length >= 2) {
+        ws.send(JSON.stringify({ type: "room_full" }));
+        return;
+      }
+
+      const symbol = rooms[roomId].length === 0 ? "X" : "O";
+      rooms[roomId].push({ ws, symbol });
+      currentRoom = roomId;
+
+      ws.send(JSON.stringify({ type: "joined", symbol }));
+
+      if (rooms[roomId].length === 2) {
+        rooms[roomId].forEach((p) =>
+          p.ws.send(JSON.stringify({ type: "start" }))
+        );
+      }
+      return;
+    }
+
+    // relay mọi message khác (move, newRound) cho người còn lại trong phòng
+    if (currentRoom && rooms[currentRoom]) {
+      rooms[currentRoom].forEach((p) => {
+        if (p.ws !== ws && p.ws.readyState === WebSocket.OPEN) {
+          p.ws.send(raw.toString());
+        }
+      });
+    }
+  });
+
+  ws.on("close", () => {
+    if (currentRoom && rooms[currentRoom]) {
+      rooms[currentRoom].forEach((p) => {
+        if (p.ws !== ws && p.ws.readyState === WebSocket.OPEN) {
+          p.ws.send(JSON.stringify({ type: "opponent_left" }));
+        }
+      });
+      cleanupRoom(currentRoom, ws);
+    }
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log("Server dang chay tren port " + PORT));
